@@ -1,9 +1,11 @@
 import streamlit as st
+import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 
 from cuestionario import PREGUNTAS, calcular_perfil
-from datos import cargar_catalogo, preparar_datos
+from datos import cargar_catalogo, preparar_datos, cargar_datos_guardados
 from motor import optimizar_portafolio
 from simulacion import evaluar_politicas, resumir_resultados
 
@@ -77,11 +79,39 @@ def cargar_datos_mercado():
 
     catalogo = cargar_catalogo()
 
-    precios, retornos = preparar_datos(
-        periodo="7y"
-    )
+    try:
+
+        precios, retornos = preparar_datos(
+            periodo="7y"
+        )
+
+    except Exception:
+
+        # Si Yahoo Finance no responde usamos los CSV guardados
+        precios, retornos = cargar_datos_guardados()
 
     return catalogo, precios, retornos
+
+
+@st.cache_data(show_spinner=False)
+def correr_simulacion(pesos, perfil, capital, max_activos):
+    """
+    Corre las 500 simulaciones. Se guarda en caché para que,
+    si el cliente vuelve a dar clic con los mismos datos,
+    el resultado aparezca de inmediato.
+    """
+
+    catalogo, precios, retornos = cargar_datos_mercado()
+
+    return evaluar_politicas(
+        retornos=retornos,
+        pesos=pesos,
+        perfil=perfil,
+        capital_inicial=capital,
+        n_escenarios=500,
+        catalogo=catalogo,
+        max_activos=max_activos
+    )
 
 
 def nivel_lambda(lam):
@@ -101,7 +131,8 @@ def limpiar_simulacion():
         "resultados_simulacion",
         "resumen_simulacion",
         "banda_optima",
-        "tuning_banda"
+        "tuning_banda",
+        "trayectorias"
     ]
 
     for clave in claves:
@@ -114,9 +145,8 @@ def limpiar_simulacion():
 # ENCABEZADO
 # =========================================================
 
-st.markdown(
-    '<p class="main-title">Behavioral Portfolio Advisor</p>',
-    unsafe_allow_html=True
+st.title(
+    "Behavioral Portfolio Advisor"
 )
 
 st.markdown(
@@ -225,20 +255,15 @@ if "perfil" in st.session_state:
 
     st.header("2. Tu perfil")
 
+    # El HTML va sin sangría: si las líneas empiezan con
+    # 4 espacios, Streamlit las muestra como bloque de código.
     st.markdown(
-        f"""
-        <div class="profile-card">
-
-            <h2>Perfil {perfil["perfil"]}</h2>
-
-            <p>
-            Tu perfil combina tu reacción frente al riesgo,
-            tu sensibilidad a las pérdidas y algunos
-            comportamientos comunes al invertir.
-            </p>
-
-        </div>
-        """,
+        f'''<div class="profile-card">
+<h2>Perfil {perfil["perfil"]}</h2>
+<p>Tu perfil combina tu reacción frente al riesgo,
+tu sensibilidad a las pérdidas y algunos
+comportamientos comunes al invertir.</p>
+</div>''',
         unsafe_allow_html=True
     )
 
@@ -388,6 +413,10 @@ if "perfil" in st.session_state:
                 ] = capital
 
                 st.session_state[
+                    "max_activos"
+                ] = max_activos
+
+                st.session_state[
                     "catalogo"
                 ] = catalogo
 
@@ -439,21 +468,12 @@ if (
 
 
     st.markdown(
-        f"""
-        <div class="portfolio-card">
-
-        <h2>
-        Portafolio para un perfil {perfil["perfil"]}
-        </h2>
-
-        <p>
-        La recomendación busca balancear crecimiento y protección
-        frente a escenarios de pérdidas fuertes, tomando en cuenta
-        tu nivel de aversión a las pérdidas.
-        </p>
-
-        </div>
-        """,
+        f'''<div class="portfolio-card">
+<h2>Portafolio para un perfil {perfil["perfil"]}</h2>
+<p>La recomendación busca balancear crecimiento y protección
+frente a escenarios de pérdidas fuertes, tomando en cuenta
+tu nivel de aversión a las pérdidas.</p>
+</div>''',
         unsafe_allow_html=True
     )
 
@@ -690,23 +710,21 @@ if (
         try:
 
             with st.spinner(
-                "Simulando 500 escenarios y comparando estrategias..."
+                "Simulando 500 escenarios y comparando estrategias "
+                "(tarda 1-3 minutos porque la política CFA "
+                "re-optimiza el portafolio cada año)..."
             ):
-
-                catalogo_sim, precios, retornos = (
-                    cargar_datos_mercado()
-                )
 
                 (
                     resultados_sim,
                     banda,
-                    tuning
-                ) = evaluar_politicas(
-                    retornos=retornos,
-                    pesos=resultado.pesos,
-                    perfil=perfil,
-                    capital_inicial=capital,
-                    n_escenarios=500
+                    tuning,
+                    trayectorias
+                ) = correr_simulacion(
+                    resultado.pesos,
+                    perfil,
+                    capital,
+                    st.session_state["max_activos"]
                 )
 
                 resumen_sim = (
@@ -730,6 +748,10 @@ if (
                 st.session_state[
                     "tuning_banda"
                 ] = tuning
+
+                st.session_state[
+                    "trayectorias"
+                ] = trayectorias
 
 
         except Exception as exc:
@@ -817,6 +839,273 @@ if (
             ),
             use_container_width=True,
             hide_index=True
+        )
+
+
+        st.caption(
+            "Riqueza final después de 10 años. El IC 95% es para la "
+            "riqueza promedio."
+        )
+
+
+        # -------------------------------------------------
+        # MÉTRICA PRINCIPAL: VALOR PROSPECT
+        # -------------------------------------------------
+
+        st.subheader(
+            "Métrica principal: valor prospect"
+        )
+
+        st.write(
+            """
+            El objetivo del modelo es el valor esperado de la función
+            de Prospect Theory (con tus parámetros λ, α y β) aplicada
+            al rendimiento total a 10 años contra tu capital inicial.
+            Mientras más alto, mejor para ti. La última columna compara
+            cada estrategia contra Buy & Hold en los mismos escenarios.
+            """
+        )
+
+        tabla_pv = resumen_sim[
+            [
+                "politica",
+                "prospect_value_medio",
+                "prospect_value_sd",
+                "prospect_IC95_low",
+                "prospect_IC95_high",
+                "dif_prospect_vs_base",
+                "dif_prospect_IC95_low",
+                "dif_prospect_IC95_high",
+                "trades_medios"
+            ]
+        ].copy()
+
+        tabla_pv.columns = [
+            "Estrategia",
+            "Valor prospect (media)",
+            "Desviación estándar",
+            "IC 95% inferior",
+            "IC 95% superior",
+            "Diferencia vs Buy & Hold",
+            "Dif. IC 95% inferior",
+            "Dif. IC 95% superior",
+            "Trades promedio"
+        ]
+
+        st.dataframe(
+            tabla_pv.style.format(
+                {
+                    "Valor prospect (media)": "{:.3f}",
+                    "Desviación estándar": "{:.3f}",
+                    "IC 95% inferior": "{:.3f}",
+                    "IC 95% superior": "{:.3f}",
+                    "Diferencia vs Buy & Hold": "{:+.3f}",
+                    "Dif. IC 95% inferior": "{:+.3f}",
+                    "Dif. IC 95% superior": "{:+.3f}",
+                    "Trades promedio": "{:.1f}"
+                }
+            ),
+            use_container_width=True,
+            hide_index=True
+        )
+
+
+        # -------------------------------------------------
+        # RECOMENDACIÓN
+        # -------------------------------------------------
+
+        st.subheader(
+            "Nuestra recomendación"
+        )
+
+        # Solo recomendamos políticas de optimización.
+        # Panic Selling y Performance Chasing modelan sesgos
+        # del cliente, no son estrategias que le sugerimos.
+        optimizadoras = [
+            "Buy & Hold",
+            "Band Rebalancing (PFA)",
+            "Lookahead (DLA)",
+            "Re-optimización anual (CFA)"
+        ]
+
+        candidatas = resumen_sim[
+            resumen_sim["politica"].isin(optimizadoras)
+        ].sort_values(
+            ["prospect_value_medio", "trades_medios"],
+            ascending=[False, True]
+        )
+
+        # Si hay empate, gana la que hace menos trades
+        mejor = candidatas.iloc[0]
+
+        # Si la mejor no es claramente mejor que Buy & Hold
+        # (el intervalo de la diferencia incluye el cero),
+        # recomendamos Buy & Hold por ser la más simple.
+        if (
+            mejor["politica"] != "Buy & Hold"
+            and mejor["dif_prospect_IC95_low"] <= 0
+        ):
+            recomendada = "Buy & Hold"
+            razon = (
+                f"La mejor estrategia en valor prospect fue "
+                f"**{mejor['politica']}**, pero su ventaja sobre Buy & Hold "
+                f"no es estadísticamente significativa (el intervalo de la "
+                f"diferencia incluye el cero). Por eso recomendamos la "
+                f"opción más simple y barata: mantener el portafolio."
+            )
+        else:
+            recomendada = mejor["politica"]
+            razon = (
+                f"Fue la estrategia con el mayor valor prospect esperado "
+                f"para tu perfil en los 500 escenarios simulados."
+            )
+
+        fila_rec = resumen_sim[
+            resumen_sim["politica"] == recomendada
+        ].iloc[0]
+
+        menor_caida = candidatas.sort_values(
+            "drawdown_medio"
+        ).iloc[0]
+
+        st.success(
+            f"**Te recomendamos: {recomendada}.** {razon}\n\n"
+            f"Con esta estrategia, la riqueza mediana a 10 años es de "
+            f"**${fila_rec['riqueza_mediana']:,.0f}**, y en el 5% de los "
+            f"peores escenarios terminarías con menos de "
+            f"**${fila_rec['percentil_5']:,.0f}**."
+        )
+
+        st.markdown(
+            f"""
+**¿Cuándo cambiaría esta recomendación?**
+
+- Si para ti es más importante evitar caídas fuertes que el
+  rendimiento final, la estrategia con menor drawdown promedio fue
+  **{menor_caida['politica']}** ({menor_caida['drawdown_medio']:.1%}).
+- Si tus respuestas al cuestionario cambian (sobre todo tu aversión
+  a pérdidas λ), cambia el portafolio y puede cambiar la estrategia.
+- Las simulaciones usan rendimientos de los últimos ~7 años, un
+  periodo muy bueno para tecnología y oro. Si el mercado se comporta
+  distinto, las estrategias que rebalancean o re-optimizan pueden
+  ganar ventaja frente a mantener el portafolio.
+            """
+        )
+
+
+        # -------------------------------------------------
+        # FAN CHART
+        # -------------------------------------------------
+
+        st.subheader(
+            "Cómo podría evolucionar tu patrimonio"
+        )
+
+        trayectorias = st.session_state[
+            "trayectorias"
+        ]
+
+        opciones_fan = list(
+            trayectorias.keys()
+        )
+
+        politica_fan = st.selectbox(
+            "Estrategia",
+            opciones_fan,
+            index=opciones_fan.index(recomendada)
+        )
+
+        caminos = trayectorias[politica_fan]
+
+        meses = np.arange(
+            caminos.shape[1]
+        ) / 12
+
+        p5, p25, p50, p75, p95 = np.percentile(
+            caminos,
+            [5, 25, 50, 75, 95],
+            axis=0
+        )
+
+        fig_fan = go.Figure()
+
+        fig_fan.add_trace(
+            go.Scatter(
+                x=meses, y=p95,
+                line=dict(width=0),
+                showlegend=False,
+                hoverinfo="skip"
+            )
+        )
+
+        fig_fan.add_trace(
+            go.Scatter(
+                x=meses, y=p5,
+                fill="tonexty",
+                fillcolor="rgba(31, 119, 180, 0.15)",
+                line=dict(width=0),
+                name="Percentiles 5 - 95"
+            )
+        )
+
+        fig_fan.add_trace(
+            go.Scatter(
+                x=meses, y=p75,
+                line=dict(width=0),
+                showlegend=False,
+                hoverinfo="skip"
+            )
+        )
+
+        fig_fan.add_trace(
+            go.Scatter(
+                x=meses, y=p25,
+                fill="tonexty",
+                fillcolor="rgba(31, 119, 180, 0.35)",
+                line=dict(width=0),
+                name="Percentiles 25 - 75"
+            )
+        )
+
+        fig_fan.add_trace(
+            go.Scatter(
+                x=meses, y=p50,
+                line=dict(color="rgb(31, 119, 180)", width=3),
+                name="Mediana"
+            )
+        )
+
+        # Algunas trayectorias individuales de ejemplo
+        for k in range(5):
+            fig_fan.add_trace(
+                go.Scatter(
+                    x=meses, y=caminos[k],
+                    line=dict(color="gray", width=1),
+                    opacity=0.4,
+                    showlegend=(k == 0),
+                    name="Escenarios de ejemplo"
+                )
+            )
+
+        fig_fan.add_hline(
+            y=st.session_state["capital"],
+            line_dash="dash",
+            line_color="black",
+            annotation_text="Capital inicial"
+        )
+
+        fig_fan.update_layout(
+            title=f"Riqueza simulada — {politica_fan}",
+            xaxis_title="Años",
+            yaxis_title="Riqueza",
+            yaxis_tickprefix="$",
+            yaxis_tickformat=",.0f",
+            height=500
+        )
+
+        st.plotly_chart(
+            fig_fan,
+            use_container_width=True
         )
 
 
@@ -1017,9 +1306,27 @@ if (
         # PANIC SELLING
         # -------------------------------------------------
 
+        trades_panic = float(
+            resumen_sim[
+                resumen_sim["politica"] == "Panic Selling"
+            ].iloc[0]["trades_medios"]
+        )
+
         if impacto_panic is not None:
 
-            if impacto_panic < 0:
+            if trades_panic < 0.05:
+
+                st.info(
+                    """
+                    Con tu portafolio, las caídas casi nunca llegaron
+                    al nivel en el que, según tus respuestas, venderías
+                    por pánico. Por eso en estos escenarios ese sesgo
+                    prácticamente no tuvo costo. Con un portafolio más
+                    agresivo el efecto sería mayor.
+                    """
+                )
+
+            elif impacto_panic < 0:
 
                 st.warning(
                     f"""
@@ -1133,6 +1440,17 @@ if (
                 Cada 12 meses compara distintos niveles de exposición
                 utilizando escenarios futuros simulados.
 
+                **Re-optimización anual (CFA)**  
+                Cada 12 meses vuelve a resolver el MILP de la Parte 2
+                con los últimos 60 meses disponibles (historia real
+                más los meses simulados hasta ese momento).
+
+                ### Objetivo
+
+                El valor prospect se calcula sobre el rendimiento
+                total a 10 años relativo al capital inicial, con los
+                parámetros λ, α y β estimados en el cuestionario.
+
                 **Panic Selling**  
                 Sale del mercado después de un drawdown definido
                 por el perfil del cliente.
@@ -1152,6 +1470,8 @@ if (
                 - riqueza mediana;
                 - percentiles 5 y 95;
                 - intervalo de confianza al 95%;
+                - valor prospect con su desviación e IC 95%;
+                - diferencia contra Buy & Hold (pareada por escenario);
                 - drawdown promedio;
                 - costos de transacción.
                 """

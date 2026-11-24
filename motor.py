@@ -33,8 +33,12 @@ def penalizacion_desde_lambda(lam):
     # entre 1.5 y 4.5.
     lam = np.clip(lam, 1.5, 4.5)
 
-    minimo = 0.20
-    maximo = 1.20
+    # Calibrado para que el CVaR mensual (aprox. 3% - 9%)
+    # y el rendimiento mensual (aprox. 0.3% - 1.5%) tengan
+    # un peso comparable. Con valores más altos todos los
+    # perfiles terminaban casi 100% en bonos.
+    minimo = 0.05
+    maximo = 0.50
 
     normalizado = (lam - 1.5) / (4.5 - 1.5)
 
@@ -81,6 +85,8 @@ def optimizar_portafolio(
     peso_minimo=0.05,
     peso_maximo=0.30,
     max_sector=0.40,
+    max_clase=0.50,
+    max_alternativos=0.20,
     alpha_cvar=0.95,
 ):
     """
@@ -96,6 +102,8 @@ def optimizar_portafolio(
         - máximo K activos
         - peso mínimo y máximo por activo
         - exposición máxima por sector
+        - exposición máxima por clase de activo
+          (más baja para commodities y bienes raíces)
 
     Objetivo:
         maximizar rendimiento esperado
@@ -218,6 +226,11 @@ def optimizar_portafolio(
     # LÍMITE POR SECTOR
     # --------------------------------------------------
 
+    # Guardamos sector y clase en listas para no buscar
+    # en el DataFrame dentro de cada ciclo (es mucho más rápido).
+    sector_activo = catalogo["sector"].tolist()
+    clase_activo = catalogo["clase"].tolist()
+
     sectores = catalogo["sector"].unique()
 
     for sector in sectores:
@@ -225,7 +238,7 @@ def optimizar_portafolio(
         indices = [
             i
             for i in range(n_activos)
-            if catalogo.iloc[i]["sector"] == sector
+            if sector_activo[i] == sector
         ]
 
         modelo.addConstr(
@@ -234,6 +247,39 @@ def optimizar_portafolio(
                 for i in indices
             ) <= max_sector,
             name=f"sector_{sector}"
+        )
+
+
+    # --------------------------------------------------
+    # LÍMITE POR CLASE DE ACTIVO
+    # --------------------------------------------------
+
+    # Sin este límite el modelo ponía hasta 55% en oro
+    # y commodities, porque en la muestra 2020-2026
+    # el oro tuvo rendimientos muy altos. Como es común en
+    # asesoría, los activos alternativos (commodities y
+    # bienes raíces) tienen un límite más bajo.
+    clases = catalogo["clase"].unique()
+
+    for clase in clases:
+
+        indices = [
+            i
+            for i in range(n_activos)
+            if clase_activo[i] == clase
+        ]
+
+        if clase in ["Commodities", "Real Estate"]:
+            limite = max_alternativos
+        else:
+            limite = max_clase
+
+        modelo.addConstr(
+            gp.quicksum(
+                w[i]
+                for i in indices
+            ) <= limite,
+            name=f"clase_{clase}"
         )
 
 

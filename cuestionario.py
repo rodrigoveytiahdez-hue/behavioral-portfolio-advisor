@@ -1,5 +1,7 @@
 # cuestionario.py
 
+import math
+
 PREGUNTAS = [
     {
         "id": "q1",
@@ -21,29 +23,38 @@ PREGUNTAS = [
     },
     {
         "id": "q4",
-        "titulo": "Ganancia segura o incierta",
-        "texto": "¿Qué opción preferirías?",
+        "titulo": "Equivalente cierto — ganancia 1",
+        "texto": "Tienes un boleto con 50% de probabilidad de ganar $10,000 y 50% de ganar $0. ¿Cuál es la cantidad segura más baja por la que venderías el boleto?",
         "opciones": [
-            "Recibir $5,000 seguros",
-            "50% de ganar $10,000 y 50% de ganar $0",
+            "$2,500",
+            "$3,500",
+            "$4,500",
+            "$5,000",
+            "$6,000",
         ],
     },
     {
         "id": "q5",
-        "titulo": "Otra decisión de ganancia",
-        "texto": "¿Qué opción preferirías?",
+        "titulo": "Equivalente cierto — ganancia 2",
+        "texto": "Tienes un boleto con 50% de probabilidad de ganar $20,000 y 50% de ganar $0. ¿Cuál es la cantidad segura más baja por la que venderías el boleto?",
         "opciones": [
-            "Recibir $7,500 seguros",
-            "50% de ganar $15,000 y 50% de ganar $0",
+            "$5,000",
+            "$7,000",
+            "$9,000",
+            "$10,000",
+            "$12,000",
         ],
     },
     {
         "id": "q6",
-        "titulo": "Decisión frente a una pérdida",
-        "texto": "Si tuvieras que enfrentar una pérdida, ¿qué preferirías?",
+        "titulo": "Equivalente cierto — pérdida",
+        "texto": "Enfrentas una situación con 50% de probabilidad de perder $10,000 y 50% de perder $0. ¿Cuál es la pérdida segura más alta que pagarías para evitar ese riesgo?",
         "opciones": [
-            "Perder $5,000 con seguridad",
-            "50% de perder $10,000 y 50% de perder $0",
+            "$2,500",
+            "$3,500",
+            "$4,500",
+            "$5,000",
+            "$6,000",
         ],
     },
     {
@@ -125,39 +136,77 @@ def calcular_lambda(respuestas):
         return 4.5
 
 
+def parametro_desde_equivalente(equivalente, premio, minimo=0.30, maximo=1.20):
+    """
+    Con la función de valor v(x) = x^a y una lotería 50/50
+    entre "premio" y 0, el equivalente cierto (CE) cumple:
+
+        CE^a = 0.5 * premio^a   ->   a = ln(0.5) / ln(CE / premio)
+
+    Si CE = premio/2 el cliente es neutral al riesgo (a = 1).
+    """
+
+    razon = equivalente / premio
+
+    # Evitamos log(0) y divisiones entre cero
+    razon = min(max(razon, 0.01), 0.99)
+
+    valor = math.log(0.5) / math.log(razon)
+
+    return min(max(valor, minimo), maximo)
+
+
+def a_numero(texto):
+    """
+    Convierte "$4,500" en 4500.
+    """
+
+    return float(
+        texto.replace("$", "").replace(",", "")
+    )
+
+
 def calcular_alpha(respuestas):
     """
     Alpha representa la curvatura frente a ganancias.
-    Valores menores indican mayor preferencia por ganancias seguras.
+    Se estima con los equivalentes ciertos de q4 y q5
+    y se promedian ambas estimaciones.
+
+    alpha < 1 -> aversión al riesgo en ganancias.
     """
 
-    elecciones_riesgosas = 0
+    alpha_q4 = parametro_desde_equivalente(
+        a_numero(respuestas["q4"]),
+        10_000
+    )
 
-    if respuestas["q4"].startswith("50%"):
-        elecciones_riesgosas += 1
+    alpha_q5 = parametro_desde_equivalente(
+        a_numero(respuestas["q5"]),
+        20_000
+    )
 
-    if respuestas["q5"].startswith("50%"):
-        elecciones_riesgosas += 1
-
-    if elecciones_riesgosas == 0:
-        return 0.70
-    elif elecciones_riesgosas == 1:
-        return 0.82
-    else:
-        return 0.95
+    return round((alpha_q4 + alpha_q5) / 2, 2)
 
 
 def calcular_beta(respuestas):
     """
     Beta representa la curvatura frente a pérdidas.
-    Una mayor disposición a apostar para evitar una pérdida
-    se representa con una beta menor.
+    Con v(x) = -lambda * (-x)^beta y una lotería 50/50 entre
+    perder $10,000 y $0, la pérdida segura máxima que el
+    cliente pagaría cumple la misma fórmula que en ganancias
+    (lambda se cancela).
+
+    beta < 1 -> el cliente prefiere arriesgarse para evitar
+    una pérdida segura (búsqueda de riesgo en pérdidas).
     """
 
-    if respuestas["q6"].startswith("50%"):
-        return 0.75
-
-    return 0.95
+    return round(
+        parametro_desde_equivalente(
+            a_numero(respuestas["q6"]),
+            10_000
+        ),
+        2
+    )
 
 
 def calcular_panic_score(respuestas):

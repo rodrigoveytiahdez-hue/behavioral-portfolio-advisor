@@ -3,6 +3,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from motor import optimizar_portafolio
+
 
 # =========================================================
 # RESULTADO DE UNA TRAYECTORIA
@@ -15,6 +17,7 @@ class ResultadoTrayectoria:
     costos_transaccion: float
     numero_trades: int
     valor_prospect: float
+    trayectoria: np.ndarray
 
 
 # =========================================================
@@ -27,6 +30,11 @@ def prospect_value(x, alpha, beta, lam):
 
     x > 0  -> ganancias
     x < 0  -> pérdidas
+
+    IMPORTANTE: x se mide como rendimiento relativo al punto
+    de referencia (por ejemplo 0.25 = +25%), no en pesos.
+    Si se usa en pesos y alpha != beta, el resultado cambia
+    con el tamaño del capital, lo cual no tiene sentido.
     """
 
     x = np.asarray(x, dtype=float)
@@ -298,9 +306,11 @@ def elegir_riesgo_dla(
             )
         )
 
+        # Rendimiento relativo al punto de referencia
         diferencia = (
             riqueza_terminal
-            - riqueza_referencia
+            / riqueza_referencia
+            - 1
         )
 
         utilidad = prospect_value(
@@ -342,7 +352,12 @@ def simular_trayectoria(
     recovery_threshold=0.10,
     chasing_tilt=0.20,
     costo_transaccion=0.001,
-    escenarios_lookahead=None
+    escenarios_lookahead=None,
+    retornos_historicos=None,
+    catalogo=None,
+    ventana_cfa=60,
+    frecuencia_cfa=12,
+    max_activos=8
 ):
     """
     Simula una trayectoria de 120 meses.
@@ -385,6 +400,9 @@ def simular_trayectoria(
     benchmark_salida = None
 
     historia = []
+
+    # Riqueza al inicio de cada mes (para el fan chart)
+    trayectoria = [riqueza]
 
     for t in range(
         len(escenario)
@@ -469,7 +487,57 @@ def simular_trayectoria(
 
 
         # =================================================
-        # POLICY 4 — PANIC SELLING
+        # POLICY 4 — CFA: RE-OPTIMIZAR EL MILP CADA AÑO
+        # =================================================
+
+        elif politica == "Re-optimización anual (CFA)":
+
+            # Cada "frecuencia_cfa" meses se vuelve a resolver
+            # el MILP de la Parte 2 con los últimos "ventana_cfa"
+            # meses disponibles: historia real + meses simulados.
+            # Parámetros ajustables: ventana_cfa y frecuencia_cfa.
+            if (
+                t > 0
+                and t % frecuencia_cfa == 0
+            ):
+
+                pasado = np.vstack(
+                    [
+                        retornos_historicos.to_numpy(),
+                        np.array(historia)
+                    ]
+                )
+
+                ventana = pd.DataFrame(
+                    pasado[-ventana_cfa:],
+                    columns=retornos_historicos.columns
+                )
+
+                try:
+
+                    nuevo = optimizar_portafolio(
+                        retornos=ventana,
+                        catalogo=catalogo,
+                        lambda_cliente=perfil["lambda"],
+                        max_activos=max_activos
+                    )
+
+                    pesos_objetivo = alinear_pesos(
+                        nuevo.pesos,
+                        retornos_historicos.columns
+                    )
+
+                except Exception:
+
+                    # Si Gurobi no encuentra solución,
+                    # regresamos al portafolio original.
+                    pesos_objetivo = (
+                        pesos_base.copy()
+                    )
+
+
+        # =================================================
+        # POLICY 5 — PANIC SELLING
         # =================================================
 
         elif politica == "Panic Selling":
@@ -514,6 +582,12 @@ def simular_trayectoria(
 
                     benchmark_salida = None
 
+                    # Al volver a entrar reiniciamos el máximo.
+                    # Sin esto el drawdown seguía arriba del
+                    # umbral y el cliente volvía a vender al
+                    # mes siguiente (entraba y salía cada mes).
+                    peak = riqueza
+
                 else:
 
                     pesos_objetivo = (
@@ -524,7 +598,7 @@ def simular_trayectoria(
 
 
         # =================================================
-        # POLICY 5 — PERFORMANCE CHASING
+        # POLICY 6 — PERFORMANCE CHASING
         # =================================================
 
         elif politica == "Performance Chasing":
@@ -652,6 +726,10 @@ def simular_trayectoria(
             riqueza
         )
 
+        trayectoria.append(
+            riqueza
+        )
+
 
         # Benchmark igual ponderado del mercado
         benchmark *= (
@@ -666,9 +744,11 @@ def simular_trayectoria(
     # OBJETIVO FINAL
     # =====================================================
 
+    # Rendimiento total relativo al punto de referencia
     diferencia_terminal = (
         riqueza
-        - riqueza_referencia
+        / riqueza_referencia
+        - 1
     )
 
     valor = float(
@@ -686,7 +766,10 @@ def simular_trayectoria(
         max_drawdown=max_drawdown,
         costos_transaccion=costos_totales,
         numero_trades=trades,
-        valor_prospect=valor
+        valor_prospect=valor,
+        trayectoria=np.array(
+            trayectoria
+        )
     )
 
 
@@ -699,7 +782,7 @@ def tunear_banda(
     pesos_base,
     perfil,
     capital_inicial=1_000_000,
-    bandas=(0.03, 0.05, 0.08, 0.10, 0.15, 0.20, 0.25, 0.30),
+    bandas=(0.02, 0.03, 0.05, 0.08, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50),
     n_escenarios=150,
     seed=111
 ):
@@ -774,7 +857,9 @@ def evaluar_politicas(
     capital_inicial=1_000_000,
     n_escenarios=500,
     seed_final=999,
-    seed_tuning=111
+    seed_tuning=111,
+    catalogo=None,
+    max_activos=8
 ):
     """
     Compara todas las políticas usando exactamente
@@ -831,12 +916,16 @@ def evaluar_politicas(
         "Buy & Hold",
         "Band Rebalancing (PFA)",
         "Lookahead (DLA)",
+        "Re-optimización anual (CFA)",
         "Panic Selling",
         "Performance Chasing"
     ]
 
 
     filas = []
+
+    # Riqueza mes a mes de cada escenario, por política
+    trayectorias = {}
 
 
     # Parámetros behavioral basados en cuestionario
@@ -862,6 +951,8 @@ def evaluar_politicas(
 
     for politica in politicas:
 
+        caminos = []
+
         for n, escenario in enumerate(
             escenarios
         ):
@@ -877,8 +968,15 @@ def evaluar_politicas(
                     panic_threshold=panic_threshold,
                     recovery_threshold=0.10,
                     chasing_tilt=chasing_tilt,
-                    escenarios_lookahead=escenarios_lookahead
+                    escenarios_lookahead=escenarios_lookahead,
+                    retornos_historicos=retornos,
+                    catalogo=catalogo,
+                    max_activos=max_activos
                 )
+            )
+
+            caminos.append(
+                resultado.trayectoria
             )
 
             filas.append(
@@ -893,6 +991,10 @@ def evaluar_politicas(
                 }
             )
 
+        trayectorias[politica] = np.array(
+            caminos
+        )
+
 
     resultados = pd.DataFrame(
         filas
@@ -902,7 +1004,8 @@ def evaluar_politicas(
     return (
         resultados,
         mejor_banda,
-        tabla_tuning
+        tabla_tuning,
+        trayectorias
     )
 
 
@@ -911,14 +1014,29 @@ def evaluar_politicas(
 # =========================================================
 
 def resumir_resultados(
-    resultados
+    resultados,
+    baseline="Buy & Hold"
 ):
     """
     Produce las métricas requeridas por el proyecto:
     media, desviación, percentiles e intervalo de confianza.
+
+    La métrica principal es el valor prospect (el objetivo
+    del modelo de Powell). También reportamos la diferencia
+    contra el baseline escenario por escenario: como todas
+    las políticas usan los mismos escenarios (common random
+    numbers), el intervalo de la diferencia es mucho más
+    angosto que comparar los intervalos por separado.
     """
 
     filas = []
+
+    base = (
+        resultados[
+            resultados["politica"] == baseline
+        ]
+        .set_index("escenario")
+    )
 
     for politica, df in resultados.groupby(
         "politica"
@@ -950,6 +1068,44 @@ def resumir_resultados(
         ci_high = (
             media
             + 1.96 * error
+        )
+
+        # ---- Valor prospect (métrica principal) ----
+
+        pv = df["valor_prospect"]
+
+        pv_media = pv.mean()
+
+        pv_sd = pv.std(
+            ddof=1
+        )
+
+        pv_error = (
+            pv_sd / np.sqrt(n)
+        )
+
+        # ---- Diferencia pareada contra el baseline ----
+
+        actual = df.set_index("escenario")
+
+        dif_pv = (
+            actual["valor_prospect"]
+            - base["valor_prospect"]
+        )
+
+        dif_riqueza = (
+            actual["riqueza_final"]
+            - base["riqueza_final"]
+        )
+
+        dif_pv_error = (
+            dif_pv.std(ddof=1)
+            / np.sqrt(n)
+        )
+
+        dif_riqueza_error = (
+            dif_riqueza.std(ddof=1)
+            / np.sqrt(n)
         )
 
         filas.append(
@@ -992,9 +1148,34 @@ def resumir_resultados(
                     ].mean(),
 
                 "prospect_value_medio":
-                    df[
-                        "valor_prospect"
-                    ].mean()
+                    pv_media,
+
+                "prospect_value_sd":
+                    pv_sd,
+
+                "prospect_IC95_low":
+                    pv_media - 1.96 * pv_error,
+
+                "prospect_IC95_high":
+                    pv_media + 1.96 * pv_error,
+
+                "dif_prospect_vs_base":
+                    dif_pv.mean(),
+
+                "dif_prospect_IC95_low":
+                    dif_pv.mean() - 1.96 * dif_pv_error,
+
+                "dif_prospect_IC95_high":
+                    dif_pv.mean() + 1.96 * dif_pv_error,
+
+                "dif_riqueza_vs_base":
+                    dif_riqueza.mean(),
+
+                "dif_riqueza_IC95_low":
+                    dif_riqueza.mean() - 1.96 * dif_riqueza_error,
+
+                "dif_riqueza_IC95_high":
+                    dif_riqueza.mean() + 1.96 * dif_riqueza_error
             }
         )
 
@@ -1067,13 +1248,15 @@ if __name__ == "__main__":
     (
         resultados,
         banda,
-        tuning
+        tuning,
+        trayectorias
     ) = evaluar_politicas(
         retornos=retornos,
         pesos=portafolio.pesos,
         perfil=perfil_prueba,
         capital_inicial=1_000_000,
-        n_escenarios=500
+        n_escenarios=500,
+        catalogo=catalogo
     )
 
 
@@ -1109,7 +1292,10 @@ if __name__ == "__main__":
                 "riqueza_mediana",
                 "percentil_5",
                 "percentil_95",
-                "drawdown_medio"
+                "drawdown_medio",
+                "prospect_value_medio",
+                "prospect_IC95_low",
+                "prospect_IC95_high"
             ]
         ].to_string(
             index=False

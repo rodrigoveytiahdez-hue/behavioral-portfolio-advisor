@@ -94,6 +94,14 @@ def calcular_retornos_mensuales(precios):
         precios
     )
 
+    # Si el último mes todavía no termina (por ejemplo, hoy es
+    # 23 de noviembre), su "cierre mensual" es solo un cierre
+    # parcial. Lo quitamos para no mezclar meses incompletos.
+    ultimo_dia = precios.index[-1]
+
+    if ultimo_dia < precios_mensuales.index[-1] - pd.Timedelta(days=3):
+        precios_mensuales = precios_mensuales.iloc[:-1]
+
     retornos = precios_mensuales.pct_change(
         fill_method=None
     )
@@ -118,6 +126,30 @@ def preparar_datos(
         periodo=periodo
     )
 
+    retornos = calcular_retornos_mensuales(
+        precios
+    )
+
+    return precios, retornos
+
+
+def cargar_datos_guardados():
+    """
+    Lee los CSV de la carpeta data/.
+
+    Se usa como respaldo cuando Yahoo Finance no responde,
+    para que el dashboard funcione aunque no haya internet
+    (por ejemplo, durante la presentación).
+    """
+
+    precios = pd.read_csv(
+        DATA_DIR / "precios_diarios.csv",
+        index_col=0,
+        parse_dates=True
+    )
+
+    # Recalculamos los rendimientos con la misma función
+    # para aplicar la misma limpieza (quitar meses incompletos).
     retornos = calcular_retornos_mensuales(
         precios
     )
