@@ -19,6 +19,10 @@ class ResultadoTrayectoria:
     valor_prospect: float
     trayectoria: np.ndarray
 
+    # Diagnóstico de la política CFA
+    cfa_fallos: int = 0
+    cfa_ultimo_error: str = ""
+
 
 # =========================================================
 # PROSPECT THEORY
@@ -28,21 +32,18 @@ def prospect_value(x, alpha, beta, lam):
     """
     Función de valor de Prospect Theory.
 
-    x > 0  -> ganancias
-    x < 0  -> pérdidas
+    x > 0 -> ganancias
+    x < 0 -> pérdidas
 
-    IMPORTANTE: x se mide como rendimiento relativo al punto
-    de referencia (por ejemplo 0.25 = +25%), no en pesos.
-    Si se usa en pesos y alpha != beta, el resultado cambia
-    con el tamaño del capital, lo cual no tiene sentido.
+    x se mide como rendimiento relativo al punto de referencia
+    (por ejemplo, 0.25 = +25%), no en pesos.
     """
-
     x = np.asarray(x, dtype=float)
 
     return np.where(
         x >= 0,
         np.power(np.maximum(x, 0), alpha),
-        -lam * np.power(np.maximum(-x, 0), beta)
+        -lam * np.power(np.maximum(-x, 0), beta),
     )
 
 
@@ -56,51 +57,46 @@ def generar_escenarios(
     horizonte=120,
     bloque_min=3,
     bloque_max=6,
-    seed=2026
+    seed=2026,
 ):
     """
-    Genera escenarios de rendimientos mensuales mediante
-    block bootstrap.
-
-    Los bloques contienen entre 3 y 6 meses consecutivos.
-    Esto conserva parte de la estructura temporal observada.
+    Genera escenarios de rendimientos mensuales mediante block bootstrap.
+    Los bloques contienen entre 3 y 6 meses consecutivos para conservar
+    parte de la estructura temporal observada.
     """
+    if retornos.empty:
+        raise ValueError("No hay retornos para generar escenarios.")
 
     rng = np.random.default_rng(seed)
-
-    datos = retornos.to_numpy()
-
+    datos = retornos.to_numpy(dtype=float)
     n_meses, n_activos = datos.shape
 
+    if n_meses < bloque_min:
+        raise ValueError("No hay suficientes meses para el block bootstrap.")
+
+    bloque_max = min(bloque_max, n_meses)
+
     escenarios = np.zeros(
-        (
-            n_escenarios,
-            horizonte,
-            n_activos
-        )
+        (n_escenarios, horizonte, n_activos),
+        dtype=float,
     )
 
     for n in range(n_escenarios):
-
         meses = []
 
         while len(meses) < horizonte:
-
             longitud = int(
                 rng.integers(
                     bloque_min,
-                    bloque_max + 1
+                    bloque_max + 1,
                 )
             )
 
-            max_inicio = (
-                n_meses - longitud
-            )
-
+            max_inicio = n_meses - longitud
             inicio = int(
                 rng.integers(
                     0,
-                    max_inicio + 1
+                    max_inicio + 1,
                 )
             )
 
@@ -113,7 +109,8 @@ def generar_escenarios(
             )
 
         escenarios[n] = np.array(
-            meses[:horizonte]
+            meses[:horizonte],
+            dtype=float,
         )
 
     return escenarios
@@ -125,23 +122,23 @@ def generar_escenarios(
 
 def alinear_pesos(
     pesos,
-    columnas
+    columnas,
 ):
     """
-    Convierte la cartera seleccionada por Gurobi
-    en un vector compatible con todos los activos.
+    Convierte la cartera seleccionada por Gurobi en un vector compatible
+    con todos los activos de la matriz de retornos.
     """
-
     return np.array(
         [
             float(
                 pesos.get(
                     ticker,
-                    0.0
+                    0.0,
                 )
             )
             for ticker in columnas
-        ]
+        ],
+        dtype=float,
     )
 
 
@@ -153,11 +150,10 @@ def aplicar_trade(
     riqueza,
     pesos_actuales,
     pesos_objetivo,
-    costo=0.001
+    costo=0.001,
 ):
     """
-    Transaction cost = 10 basis points
-    sobre el valor negociado.
+    Costo de transacción = 10 basis points sobre el valor negociado.
 
     10 bps = 0.10% = 0.001
     """
@@ -181,17 +177,19 @@ def aplicar_trade(
     return (
         riqueza_despues,
         costo_monetario,
-        turnover
+        turnover,
     )
 
 
 def actualizar_pesos(
     pesos,
-    retornos_mes
+    retornos_mes,
 ):
     """
-    Después de que cambian los precios,
-    los pesos del portafolio también cambian.
+    Actualiza los pesos después de los rendimientos del mes.
+
+    Si los pesos suman menos de 1, la diferencia se interpreta
+    como cash con rendimiento 0%.
     """
 
     crecimiento = (
@@ -199,15 +197,14 @@ def actualizar_pesos(
         * (1 + retornos_mes)
     )
 
-    rendimiento_portafolio = (
-        np.dot(
-            pesos,
-            retornos_mes
-        )
+    rendimiento_portafolio = np.dot(
+        pesos,
+        retornos_mes,
     )
 
     denominador = (
-        1 + rendimiento_portafolio
+        1
+        + rendimiento_portafolio
     )
 
     if denominador <= 0:
@@ -222,27 +219,26 @@ def actualizar_pesos(
 
 
 # =========================================================
-# DLA — LOOKAHEAD
+# DLA — DIRECT LOOKAHEAD APPROXIMATION
 # =========================================================
 
 def crear_lookahead_scenarios(
     retornos,
     n_escenarios=200,
     horizonte=12,
-    seed=777
+    seed=777,
 ):
     """
     Escenarios internos utilizados por la política DLA.
 
-    OJO:
-    No son los mismos escenarios de evaluación final.
+    No son los mismos escenarios de la evaluación final.
     """
 
     return generar_escenarios(
-        retornos,
+        retornos=retornos,
         n_escenarios=n_escenarios,
         horizonte=horizonte,
-        seed=seed
+        seed=seed,
     )
 
 
@@ -254,18 +250,22 @@ def elegir_riesgo_dla(
     perfil,
     riqueza_referencia,
     costo_transaccion=0.001,
-    escalas=(0.50, 0.75, 1.00)
+    escalas=(0.50, 0.75, 1.00),
 ):
     """
     Direct Lookahead Approximation.
 
-    La política compara diferentes niveles de exposición
-    al portafolio recomendado.
+    Compara diferentes niveles de exposición:
 
     0.50 = 50% cartera + 50% cash
     0.75 = 75% cartera + 25% cash
     1.00 = 100% cartera
     """
+
+    if escenarios_lookahead is None:
+        raise ValueError(
+            "DLA necesita escenarios de lookahead."
+        )
 
     mejor_valor = -np.inf
     mejor_peso = pesos_base.copy()
@@ -277,17 +277,17 @@ def elegir_riesgo_dla(
             * pesos_base
         )
 
-        riqueza_trade, _, _ = (
-            aplicar_trade(
-                riqueza,
-                pesos_actuales,
-                candidato,
-                costo_transaccion
-            )
+        (
+            riqueza_trade,
+            _,
+            _
+        ) = aplicar_trade(
+            riqueza=riqueza,
+            pesos_actuales=pesos_actuales,
+            pesos_objetivo=candidato,
+            costo=costo_transaccion,
         )
 
-        # Rendimientos mensuales del portafolio
-        # para cada escenario interno.
         retornos_portafolio = (
             escenarios_lookahead
             @ candidato
@@ -302,11 +302,10 @@ def elegir_riesgo_dla(
             riqueza_trade
             * np.prod(
                 factores,
-                axis=1
+                axis=1,
             )
         )
 
-        # Rendimiento relativo al punto de referencia
         diferencia = (
             riqueza_terminal
             / riqueza_referencia
@@ -317,11 +316,13 @@ def elegir_riesgo_dla(
             diferencia,
             perfil["alpha"],
             perfil["beta"],
-            perfil["lambda"]
+            perfil["lambda"],
         )
 
-        valor_esperado = (
-            np.mean(utilidad)
+        valor_esperado = float(
+            np.mean(
+                utilidad
+            )
         )
 
         if valor_esperado > mejor_valor:
@@ -357,22 +358,22 @@ def simular_trayectoria(
     catalogo=None,
     ventana_cfa=60,
     frecuencia_cfa=12,
-    max_activos=8
+    max_activos=8,
 ):
     """
-    Simula una trayectoria de 120 meses.
+    Simula una trayectoria mensual.
 
     Estado:
-        riqueza
-        pesos actuales
-        peak wealth
-        retornos recientes
+        - riqueza
+        - pesos actuales
+        - máximo histórico de riqueza
+        - retornos recientes
 
     Decisión:
-        pesos objetivo / trades del mes
+        - pesos objetivo / trades del mes
 
-    Exogenous information:
-        retornos del mercado del siguiente mes
+    Información exógena:
+        - retornos del mercado del siguiente mes
     """
 
     riqueza = float(
@@ -385,14 +386,22 @@ def simular_trayectoria(
 
     peak = riqueza
 
+    pesos_base = np.asarray(
+        pesos_base,
+        dtype=float,
+    )
+
     pesos_actuales = (
         pesos_base.copy()
     )
 
     costos_totales = 0.0
     trades = 0
-
     max_drawdown = 0.0
+
+    # Diagnóstico de CFA
+    cfa_fallos = 0
+    cfa_ultimo_error = ""
 
     # Variables para panic selling
     en_cash = False
@@ -401,8 +410,10 @@ def simular_trayectoria(
 
     historia = []
 
-    # Riqueza al inicio de cada mes (para el fan chart)
-    trayectoria = [riqueza]
+    # Para el fan chart
+    trayectoria = [
+        riqueza
+    ]
 
     for t in range(
         len(escenario)
@@ -415,14 +426,19 @@ def simular_trayectoria(
         drawdown = (
             0.0
             if peak <= 0
-            else (
-                peak - riqueza
-            ) / peak
+            else max(
+                0.0,
+                (
+                    peak
+                    - riqueza
+                )
+                / peak
+            )
         )
 
         max_drawdown = max(
             max_drawdown,
-            drawdown
+            drawdown,
         )
 
         pesos_objetivo = (
@@ -467,7 +483,6 @@ def simular_trayectoria(
 
         elif politica == "Lookahead (DLA)":
 
-            # Revisión anual
             if (
                 t == 0
                 or t % 12 == 0
@@ -481,56 +496,80 @@ def simular_trayectoria(
                         escenarios_lookahead=escenarios_lookahead,
                         perfil=perfil,
                         riqueza_referencia=riqueza_referencia,
-                        costo_transaccion=costo_transaccion
+                        costo_transaccion=costo_transaccion,
                     )
                 )
 
 
         # =================================================
-        # POLICY 4 — CFA: RE-OPTIMIZAR EL MILP CADA AÑO
+        # POLICY 4 — CFA
         # =================================================
 
         elif politica == "Re-optimización anual (CFA)":
 
-            # Cada "frecuencia_cfa" meses se vuelve a resolver
-            # el MILP de la Parte 2 con los últimos "ventana_cfa"
-            # meses disponibles: historia real + meses simulados.
-            # Parámetros ajustables: ventana_cfa y frecuencia_cfa.
             if (
                 t > 0
                 and t % frecuencia_cfa == 0
             ):
 
-                pasado = np.vstack(
-                    [
-                        retornos_historicos.to_numpy(),
-                        np.array(historia)
-                    ]
-                )
-
-                ventana = pd.DataFrame(
-                    pasado[-ventana_cfa:],
-                    columns=retornos_historicos.columns
-                )
-
                 try:
+
+                    if retornos_historicos is None:
+
+                        raise ValueError(
+                            "CFA necesita retornos_historicos."
+                        )
+
+                    if catalogo is None:
+
+                        raise ValueError(
+                            "CFA necesita el catálogo de activos."
+                        )
+
+                    pasado = np.vstack(
+                        [
+                            retornos_historicos.to_numpy(),
+                            np.array(
+                                historia
+                            ),
+                        ]
+                    )
+
+                    ventana = pd.DataFrame(
+                        pasado[
+                            -ventana_cfa:
+                        ],
+                        columns=retornos_historicos.columns,
+                    )
 
                     nuevo = optimizar_portafolio(
                         retornos=ventana,
                         catalogo=catalogo,
-                        lambda_cliente=perfil["lambda"],
-                        max_activos=max_activos
+                        lambda_cliente=perfil[
+                            "lambda"
+                        ],
+                        max_activos=max_activos,
                     )
 
-                    pesos_objetivo = alinear_pesos(
-                        nuevo.pesos,
-                        retornos_historicos.columns
+                    pesos_objetivo = (
+                        alinear_pesos(
+                            nuevo.pesos,
+                            retornos_historicos.columns,
+                        )
                     )
 
-                except Exception:
+                except Exception as exc:
 
-                    # Si Gurobi no encuentra solución,
-                    # regresamos al portafolio original.
+                    cfa_fallos += 1
+
+                    cfa_ultimo_error = (
+                        str(
+                            exc
+                        )
+                    )
+
+                    # Si CFA falla, seguimos con
+                    # el portafolio base.
                     pesos_objetivo = (
                         pesos_base.copy()
                     )
@@ -579,13 +618,10 @@ def simular_trayectoria(
                     )
 
                     en_cash = False
-
                     benchmark_salida = None
 
-                    # Al volver a entrar reiniciamos el máximo.
-                    # Sin esto el drawdown seguía arriba del
-                    # umbral y el cliente volvía a vender al
-                    # mes siguiente (entraba y salía cada mes).
+                    # Reiniciamos el máximo para evitar
+                    # que vuelva a vender inmediatamente.
                     peak = riqueza
 
                 else:
@@ -609,13 +645,16 @@ def simular_trayectoria(
             ):
 
                 recientes = np.array(
-                    historia[-12:]
+                    historia[
+                        -12:
+                    ]
                 )
 
                 rendimiento_12m = (
                     np.prod(
-                        1 + recientes,
-                        axis=0
+                        1
+                        + recientes,
+                        axis=0,
                     )
                     - 1
                 )
@@ -630,18 +669,25 @@ def simular_trayectoria(
                     )
                 )
 
-                ganadores[top] = (
-                    1 / len(top)
+                ganadores[
+                    top
+                ] = (
+                    1
+                    / len(
+                        top
+                    )
                 )
 
                 pesos_objetivo = (
-                    (1 - chasing_tilt)
+                    (
+                        1
+                        - chasing_tilt
+                    )
                     * pesos_base
                     +
                     chasing_tilt
                     * ganadores
                 )
-
 
         else:
 
@@ -656,18 +702,18 @@ def simular_trayectoria(
 
         if not np.allclose(
             pesos_objetivo,
-            pesos_actuales
+            pesos_actuales,
         ):
 
             (
                 riqueza,
                 costo_mes,
-                turnover
+                turnover,
             ) = aplicar_trade(
-                riqueza,
-                pesos_actuales,
-                pesos_objetivo,
-                costo_transaccion
+                riqueza=riqueza,
+                pesos_actuales=pesos_actuales,
+                pesos_objetivo=pesos_objetivo,
+                costo=costo_transaccion,
             )
 
             costos_totales += (
@@ -675,10 +721,29 @@ def simular_trayectoria(
             )
 
             if turnover > 1e-8:
+
                 trades += 1
 
             pesos_actuales = (
                 pesos_objetivo.copy()
+            )
+
+            drawdown_post_trade = (
+                0.0
+                if peak <= 0
+                else max(
+                    0.0,
+                    (
+                        peak
+                        - riqueza
+                    )
+                    / peak
+                )
+            )
+
+            max_drawdown = max(
+                max_drawdown,
+                drawdown_post_trade,
             )
 
 
@@ -686,8 +751,9 @@ def simular_trayectoria(
         # EXOGENOUS INFORMATION
         # -------------------------------------------------
 
-        retornos_mes = (
-            escenario[t]
+        retornos_mes = np.asarray(
+            escenario[t],
+            dtype=float,
         )
 
         historia.append(
@@ -702,7 +768,7 @@ def simular_trayectoria(
         rendimiento_portafolio = (
             np.dot(
                 pesos_actuales,
-                retornos_mes
+                retornos_mes,
             )
         )
 
@@ -717,13 +783,31 @@ def simular_trayectoria(
         pesos_actuales = (
             actualizar_pesos(
                 pesos_actuales,
-                retornos_mes
+                retornos_mes,
             )
+        )
+
+        drawdown_fin_mes = (
+            0.0
+            if peak <= 0
+            else max(
+                0.0,
+                (
+                    peak
+                    - riqueza
+                )
+                / peak
+            )
+        )
+
+        max_drawdown = max(
+            max_drawdown,
+            drawdown_fin_mes,
         )
 
         peak = max(
             peak,
-            riqueza
+            riqueza,
         )
 
         trayectoria.append(
@@ -731,7 +815,7 @@ def simular_trayectoria(
         )
 
 
-        # Benchmark igual ponderado del mercado
+        # Benchmark igual ponderado
         benchmark *= (
             1
             + np.mean(
@@ -744,7 +828,6 @@ def simular_trayectoria(
     # OBJETIVO FINAL
     # =====================================================
 
-    # Rendimiento total relativo al punto de referencia
     diferencia_terminal = (
         riqueza
         / riqueza_referencia
@@ -756,10 +839,9 @@ def simular_trayectoria(
             diferencia_terminal,
             perfil["alpha"],
             perfil["beta"],
-            perfil["lambda"]
+            perfil["lambda"],
         )
     )
-
 
     return ResultadoTrayectoria(
         riqueza_final=riqueza,
@@ -768,8 +850,11 @@ def simular_trayectoria(
         numero_trades=trades,
         valor_prospect=valor,
         trayectoria=np.array(
-            trayectoria
-        )
+            trayectoria,
+            dtype=float,
+        ),
+        cfa_fallos=cfa_fallos,
+        cfa_ultimo_error=cfa_ultimo_error,
     )
 
 
@@ -782,9 +867,21 @@ def tunear_banda(
     pesos_base,
     perfil,
     capital_inicial=1_000_000,
-    bandas=(0.02, 0.03, 0.05, 0.08, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50),
+    bandas=(
+        0.02,
+        0.03,
+        0.05,
+        0.08,
+        0.10,
+        0.15,
+        0.20,
+        0.25,
+        0.30,
+        0.40,
+        0.50,
+    ),
     n_escenarios=150,
-    seed=111
+    seed=111,
 ):
     """
     Selecciona la banda usando escenarios distintos
@@ -792,10 +889,10 @@ def tunear_banda(
     """
 
     escenarios = generar_escenarios(
-        retornos,
+        retornos=retornos,
         n_escenarios=n_escenarios,
         horizonte=120,
-        seed=seed
+        seed=seed,
     )
 
     resultados = []
@@ -806,25 +903,27 @@ def tunear_banda(
 
         for escenario in escenarios:
 
-            r = simular_trayectoria(
+            resultado = simular_trayectoria(
                 escenario=escenario,
                 pesos_base=pesos_base,
                 perfil=perfil,
                 politica="Band Rebalancing (PFA)",
                 capital_inicial=capital_inicial,
-                banda=banda
+                banda=banda,
             )
 
             valores.append(
-                r.valor_prospect
+                resultado.valor_prospect
             )
 
         resultados.append(
             {
                 "banda": banda,
-                "valor_prospect_medio": np.mean(
-                    valores
-                )
+                "valor_prospect_medio": float(
+                    np.mean(
+                        valores
+                    )
+                ),
             }
         )
 
@@ -840,9 +939,11 @@ def tunear_banda(
 
     return (
         float(
-            mejor["banda"]
+            mejor[
+                "banda"
+            ]
         ),
-        tabla
+        tabla,
     )
 
 
@@ -859,30 +960,38 @@ def evaluar_politicas(
     seed_final=999,
     seed_tuning=111,
     catalogo=None,
-    max_activos=8
+    max_activos=8,
 ):
     """
     Compara todas las políticas usando exactamente
-    los mismos escenarios de mercado.
+    los mismos escenarios.
+
+    Retorna:
+        resultados
+        mejor_banda
+        tabla_tuning
+        trayectorias
     """
 
     pesos_base = alinear_pesos(
         pesos,
-        retornos.columns
+        retornos.columns,
     )
 
+
     # -----------------------------------------------------
-    # TUNING
+    # TUNING PFA
     # -----------------------------------------------------
 
-    mejor_banda, tabla_tuning = (
-        tunear_banda(
-            retornos=retornos,
-            pesos_base=pesos_base,
-            perfil=perfil,
-            capital_inicial=capital_inicial,
-            seed=seed_tuning
-        )
+    (
+        mejor_banda,
+        tabla_tuning,
+    ) = tunear_banda(
+        retornos=retornos,
+        pesos_base=pesos_base,
+        perfil=perfil,
+        capital_inicial=capital_inicial,
+        seed=seed_tuning,
     )
 
 
@@ -892,23 +1001,23 @@ def evaluar_politicas(
 
     escenarios_lookahead = (
         crear_lookahead_scenarios(
-            retornos,
+            retornos=retornos,
             n_escenarios=200,
             horizonte=12,
-            seed=777
+            seed=777,
         )
     )
 
 
     # -----------------------------------------------------
-    # FINAL EVALUATION
+    # ESCENARIOS DE EVALUACIÓN FINAL
     # -----------------------------------------------------
 
     escenarios = generar_escenarios(
-        retornos,
+        retornos=retornos,
         n_escenarios=n_escenarios,
         horizonte=120,
-        seed=seed_final
+        seed=seed_final,
     )
 
 
@@ -918,36 +1027,48 @@ def evaluar_politicas(
         "Lookahead (DLA)",
         "Re-optimización anual (CFA)",
         "Panic Selling",
-        "Performance Chasing"
+        "Performance Chasing",
     ]
 
 
     filas = []
 
-    # Riqueza mes a mes de cada escenario, por política
     trayectorias = {}
 
 
-    # Parámetros behavioral basados en cuestionario
+    # -----------------------------------------------------
+    # PARÁMETROS BEHAVIORAL
+    # -----------------------------------------------------
+
     if perfil["panic_level"] == "Alto":
+
         panic_threshold = 0.15
 
     elif perfil["panic_level"] == "Moderado":
+
         panic_threshold = 0.20
 
     else:
+
         panic_threshold = 0.30
 
 
     if perfil["chasing_level"] == "Alto":
+
         chasing_tilt = 0.30
 
     elif perfil["chasing_level"] == "Moderado":
+
         chasing_tilt = 0.20
 
     else:
+
         chasing_tilt = 0.10
 
+
+    # -----------------------------------------------------
+    # MISMO ESCENARIO PARA TODAS LAS POLICIES
+    # -----------------------------------------------------
 
     for politica in politicas:
 
@@ -971,7 +1092,7 @@ def evaluar_politicas(
                     escenarios_lookahead=escenarios_lookahead,
                     retornos_historicos=retornos,
                     catalogo=catalogo,
-                    max_activos=max_activos
+                    max_activos=max_activos,
                 )
             )
 
@@ -987,12 +1108,17 @@ def evaluar_politicas(
                     "max_drawdown": resultado.max_drawdown,
                     "costos_transaccion": resultado.costos_transaccion,
                     "numero_trades": resultado.numero_trades,
-                    "valor_prospect": resultado.valor_prospect
+                    "valor_prospect": resultado.valor_prospect,
+                    "cfa_fallos": resultado.cfa_fallos,
+                    "cfa_ultimo_error": resultado.cfa_ultimo_error,
                 }
             )
 
-        trayectorias[politica] = np.array(
-            caminos
+        trayectorias[
+            politica
+        ] = np.array(
+            caminos,
+            dtype=float,
         )
 
 
@@ -1005,7 +1131,7 @@ def evaluar_politicas(
         resultados,
         mejor_banda,
         tabla_tuning,
-        trayectorias
+        trayectorias,
     )
 
 
@@ -1015,98 +1141,234 @@ def evaluar_politicas(
 
 def resumir_resultados(
     resultados,
-    baseline="Buy & Hold"
+    baseline="Buy & Hold",
 ):
     """
-    Produce las métricas requeridas por el proyecto:
-    media, desviación, percentiles e intervalo de confianza.
+    Produce las métricas requeridas:
 
-    La métrica principal es el valor prospect (el objetivo
-    del modelo de Powell). También reportamos la diferencia
-    contra el baseline escenario por escenario: como todas
-    las políticas usan los mismos escenarios (common random
-    numbers), el intervalo de la diferencia es mucho más
-    angosto que comparar los intervalos por separado.
+    - media
+    - mediana
+    - desviación estándar
+    - percentiles
+    - intervalo de confianza
+    - drawdown
+    - costos
+    - trades
+    - Prospect Value
+
+    También calcula diferencias pareadas contra Buy & Hold.
     """
 
-    filas = []
+    if resultados.empty:
+
+        raise ValueError(
+            "No hay resultados para resumir."
+        )
+
 
     base = (
         resultados[
-            resultados["politica"] == baseline
+            resultados[
+                "politica"
+            ] == baseline
         ]
-        .set_index("escenario")
+        .set_index(
+            "escenario"
+        )
+        .sort_index()
     )
+
+
+    if base.empty:
+
+        raise ValueError(
+            f"No se encontró el baseline '{baseline}'."
+        )
+
+
+    filas = []
+
 
     for politica, df in resultados.groupby(
         "politica"
     ):
 
+        df = df.sort_values(
+            "escenario"
+        ).copy()
+
         riqueza = df[
             "riqueza_final"
         ]
 
-        n = len(riqueza)
+        n = len(
+            riqueza
+        )
 
-        media = (
+
+        # -------------------------------------------------
+        # RIQUEZA
+        # -------------------------------------------------
+
+        media = float(
             riqueza.mean()
         )
 
-        sd = riqueza.std(
-            ddof=1
+        sd = float(
+            riqueza.std(
+                ddof=1
+            )
         )
 
         error = (
-            sd / np.sqrt(n)
+            sd
+            / np.sqrt(
+                n
+            )
         )
 
         ci_low = (
             media
-            - 1.96 * error
+            - 1.96
+            * error
         )
 
         ci_high = (
             media
-            + 1.96 * error
+            + 1.96
+            * error
         )
 
-        # ---- Valor prospect (métrica principal) ----
 
-        pv = df["valor_prospect"]
+        # -------------------------------------------------
+        # PROSPECT VALUE
+        # -------------------------------------------------
 
-        pv_media = pv.mean()
+        pv = df[
+            "valor_prospect"
+        ]
 
-        pv_sd = pv.std(
-            ddof=1
+        pv_media = float(
+            pv.mean()
+        )
+
+        pv_sd = float(
+            pv.std(
+                ddof=1
+            )
         )
 
         pv_error = (
-            pv_sd / np.sqrt(n)
+            pv_sd
+            / np.sqrt(
+                n
+            )
         )
 
-        # ---- Diferencia pareada contra el baseline ----
 
-        actual = df.set_index("escenario")
+        # -------------------------------------------------
+        # DIFERENCIAS PAREADAS VS BASELINE
+        # -------------------------------------------------
+
+        actual = df.set_index(
+            "escenario"
+        )
+
+        comunes = actual.index.intersection(
+            base.index
+        )
+
+        actual_comun = actual.loc[
+            comunes
+        ]
+
+        base_comun = base.loc[
+            comunes
+        ]
+
 
         dif_pv = (
-            actual["valor_prospect"]
-            - base["valor_prospect"]
+            actual_comun[
+                "valor_prospect"
+            ]
+            - base_comun[
+                "valor_prospect"
+            ]
         )
+
 
         dif_riqueza = (
-            actual["riqueza_final"]
-            - base["riqueza_final"]
+            actual_comun[
+                "riqueza_final"
+            ]
+            - base_comun[
+                "riqueza_final"
+            ]
         )
 
-        dif_pv_error = (
-            dif_pv.std(ddof=1)
-            / np.sqrt(n)
+
+        n_dif = len(
+            comunes
         )
 
-        dif_riqueza_error = (
-            dif_riqueza.std(ddof=1)
-            / np.sqrt(n)
-        )
+
+        if n_dif > 1:
+
+            dif_pv_error = (
+                dif_pv.std(
+                    ddof=1
+                )
+                / np.sqrt(
+                    n_dif
+                )
+            )
+
+            dif_riqueza_error = (
+                dif_riqueza.std(
+                    ddof=1
+                )
+                / np.sqrt(
+                    n_dif
+                )
+            )
+
+        else:
+
+            dif_pv_error = 0.0
+
+            dif_riqueza_error = 0.0
+
+
+        # -------------------------------------------------
+        # DIAGNÓSTICO CFA
+        # -------------------------------------------------
+
+        if "cfa_fallos" in df.columns:
+
+            cfa_fallos_total = int(
+                df[
+                    "cfa_fallos"
+                ].sum()
+            )
+
+            cfa_escenarios_con_fallo = int(
+                (
+                    df[
+                        "cfa_fallos"
+                    ]
+                    > 0
+                ).sum()
+            )
+
+        else:
+
+            cfa_fallos_total = 0
+            cfa_escenarios_con_fallo = 0
+
+
+        # -------------------------------------------------
+        # FILA FINAL
+        # -------------------------------------------------
 
         filas.append(
             {
@@ -1114,68 +1376,101 @@ def resumir_resultados(
 
                 "riqueza_media": media,
 
-                "riqueza_mediana":
-                    riqueza.median(),
+                "riqueza_mediana": float(
+                    riqueza.median()
+                ),
 
-                "percentil_5":
-                    riqueza.quantile(0.05),
+                "percentil_5": float(
+                    riqueza.quantile(
+                        0.05
+                    )
+                ),
 
-                "percentil_95":
-                    riqueza.quantile(0.95),
+                "percentil_95": float(
+                    riqueza.quantile(
+                        0.95
+                    )
+                ),
 
-                "desviacion":
-                    sd,
+                "desviacion": sd,
 
-                "IC95_low":
-                    ci_low,
+                "IC95_low": ci_low,
 
-                "IC95_high":
-                    ci_high,
+                "IC95_high": ci_high,
 
-                "drawdown_medio":
+                "drawdown_medio": float(
                     df[
                         "max_drawdown"
-                    ].mean(),
+                    ].mean()
+                ),
 
-                "costos_medios":
+                "costos_medios": float(
                     df[
                         "costos_transaccion"
-                    ].mean(),
+                    ].mean()
+                ),
 
-                "trades_medios":
+                "trades_medios": float(
                     df[
                         "numero_trades"
-                    ].mean(),
+                    ].mean()
+                ),
 
-                "prospect_value_medio":
-                    pv_media,
+                "prospect_value_medio": pv_media,
 
-                "prospect_value_sd":
-                    pv_sd,
+                "prospect_value_sd": pv_sd,
 
-                "prospect_IC95_low":
-                    pv_media - 1.96 * pv_error,
+                "prospect_IC95_low": (
+                    pv_media
+                    - 1.96
+                    * pv_error
+                ),
 
-                "prospect_IC95_high":
-                    pv_media + 1.96 * pv_error,
+                "prospect_IC95_high": (
+                    pv_media
+                    + 1.96
+                    * pv_error
+                ),
 
-                "dif_prospect_vs_base":
-                    dif_pv.mean(),
+                "dif_prospect_vs_base": float(
+                    dif_pv.mean()
+                ),
 
-                "dif_prospect_IC95_low":
-                    dif_pv.mean() - 1.96 * dif_pv_error,
+                "dif_prospect_IC95_low": float(
+                    dif_pv.mean()
+                    - 1.96
+                    * dif_pv_error
+                ),
 
-                "dif_prospect_IC95_high":
-                    dif_pv.mean() + 1.96 * dif_pv_error,
+                "dif_prospect_IC95_high": float(
+                    dif_pv.mean()
+                    + 1.96
+                    * dif_pv_error
+                ),
 
-                "dif_riqueza_vs_base":
-                    dif_riqueza.mean(),
+                "dif_riqueza_vs_base": float(
+                    dif_riqueza.mean()
+                ),
 
-                "dif_riqueza_IC95_low":
-                    dif_riqueza.mean() - 1.96 * dif_riqueza_error,
+                "dif_riqueza_IC95_low": float(
+                    dif_riqueza.mean()
+                    - 1.96
+                    * dif_riqueza_error
+                ),
 
-                "dif_riqueza_IC95_high":
-                    dif_riqueza.mean() + 1.96 * dif_riqueza_error
+                "dif_riqueza_IC95_high": float(
+                    dif_riqueza.mean()
+                    + 1.96
+                    * dif_riqueza_error
+                ),
+
+                "cfa_fallos_total": (
+                    cfa_fallos_total
+                ),
+
+                "cfa_escenarios_con_fallo": (
+                    cfa_escenarios_con_fallo
+                ),
             }
         )
 
@@ -1184,22 +1479,28 @@ def resumir_resultados(
         filas
     )
 
-    return resumen.sort_values(
-        "prospect_value_medio",
-        ascending=False
-    ).reset_index(
-        drop=True
+
+    return (
+        resumen
+        .sort_values(
+            "prospect_value_medio",
+            ascending=False,
+        )
+        .reset_index(
+            drop=True
+        )
     )
+
+
+# =========================================================
+# PRUEBA LOCAL
+# =========================================================
 
 if __name__ == "__main__":
 
     from datos import (
         cargar_catalogo,
-        preparar_datos
-    )
-
-    from motor import (
-        optimizar_portafolio
+        preparar_datos,
     )
 
 
@@ -1207,22 +1508,23 @@ if __name__ == "__main__":
         "Cargando datos..."
     )
 
+
     catalogo = (
         cargar_catalogo()
     )
+
 
     precios, retornos = (
         preparar_datos()
     )
 
 
-    # Cliente de prueba
     perfil_prueba = {
         "lambda": 2.5,
         "alpha": 0.82,
         "beta": 0.75,
         "panic_level": "Moderado",
-        "chasing_level": "Moderado"
+        "chasing_level": "Moderado",
     }
 
 
@@ -1230,14 +1532,13 @@ if __name__ == "__main__":
         "Construyendo portafolio..."
     )
 
-    portafolio = (
-        optimizar_portafolio(
-            retornos=retornos,
-            catalogo=catalogo,
-            lambda_cliente=perfil_prueba[
-                "lambda"
-            ]
-        )
+
+    portafolio = optimizar_portafolio(
+        retornos=retornos,
+        catalogo=catalogo,
+        lambda_cliente=perfil_prueba[
+            "lambda"
+        ],
     )
 
 
@@ -1245,18 +1546,19 @@ if __name__ == "__main__":
         "Simulando 500 escenarios..."
     )
 
+
     (
         resultados,
         banda,
         tuning,
-        trayectorias
+        trayectorias,
     ) = evaluar_politicas(
         retornos=retornos,
         pesos=portafolio.pesos,
         perfil=perfil_prueba,
         capital_inicial=1_000_000,
         n_escenarios=500,
-        catalogo=catalogo
+        catalogo=catalogo,
     )
 
 
@@ -1267,7 +1569,7 @@ if __name__ == "__main__":
 
     print(
         "\nBanda PFA seleccionada:",
-        banda
+        banda,
     )
 
 
@@ -1284,6 +1586,7 @@ if __name__ == "__main__":
         "\nRESULTADOS FINALES"
     )
 
+
     print(
         resumen[
             [
@@ -1295,7 +1598,9 @@ if __name__ == "__main__":
                 "drawdown_medio",
                 "prospect_value_medio",
                 "prospect_IC95_low",
-                "prospect_IC95_high"
+                "prospect_IC95_high",
+                "cfa_fallos_total",
+                "cfa_escenarios_con_fallo",
             ]
         ].to_string(
             index=False
