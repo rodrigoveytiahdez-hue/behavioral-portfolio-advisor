@@ -4,6 +4,17 @@ Proyecto final (Proyecto A): un dashboard en Streamlit que perfila a un inversio
 
 Dashboard en línea: https://rodrigoveytiahdez-hue-behavioral-portfolio-advisor-app-1gmcql.streamlit.app/
 
+## Entregables
+
+| Entregable | Archivo |
+|---|---|
+| Reporte | [Reporte_Proyecto_Final_Comportamientos.docx](<Reporte_Proyecto_Final_Comportamientos.docx>) |
+| Presentación | [Behavioral Portfolio Advisor — Proyecto Final.pptx](<Behavioral Portfolio Advisor — Proyecto Final.pptx>) |
+| Dashboard | https://rodrigoveytiahdez-hue-behavioral-portfolio-advisor-app-1gmcql.streamlit.app/ (local: `streamlit run app.py`) |
+| Código | Este repositorio; instrucciones abajo |
+
+Equipo: Rodrigo Veytia (756270), Juan Pablo Morán (753760), Erik del Castillo (750958).
+
 ## Cómo correrlo
 
 Requiere Python 3.10 o superior.
