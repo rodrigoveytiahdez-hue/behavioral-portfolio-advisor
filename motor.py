@@ -18,50 +18,108 @@ class ResultadoPortafolio:
     estado: str
 
 
+# =========================================================
+# PERFIL Y RIESGO
+# =========================================================
+
 def penalizacion_desde_lambda(lam):
     """
-    Convierte la aversión a pérdidas del cliente en el peso
-    que damos al CVaR dentro de la función objetivo.
+    Lambda controla cuánto penalizamos el CVaR.
 
-    Lambda bajo  -> cliente tolera más pérdidas.
-    Lambda alto  -> cliente es más sensible a pérdidas.
+    Lambda bajo  -> mayor tolerancia a pérdidas.
+    Lambda alto  -> mayor sensibilidad a pérdidas.
     """
 
     lam = float(lam)
 
-    # Nuestro cuestionario produce aproximadamente valores
-    # entre 1.5 y 4.5.
-    lam = np.clip(lam, 1.5, 4.5)
+    lam = np.clip(
+        lam,
+        1.5,
+        4.5
+    )
 
-    # Calibrado para que el CVaR mensual (aprox. 3% - 9%)
-    # y el rendimiento mensual (aprox. 0.3% - 1.5%) tengan
-    # un peso comparable. Con valores más altos todos los
-    # perfiles terminaban casi 100% en bonos.
     minimo = 0.05
     maximo = 0.50
 
-    normalizado = (lam - 1.5) / (4.5 - 1.5)
+    normalizado = (
+        (lam - 1.5)
+        / (4.5 - 1.5)
+    )
 
-    return minimo + normalizado * (maximo - minimo)
+    return (
+        minimo
+        + normalizado
+        * (maximo - minimo)
+    )
 
 
-def validar_datos(retornos, catalogo):
+def limites_desde_perfil(perfil):
     """
-    Comprueba que los datos necesarios para optimizar existen.
+    Restricciones de suitability.
+
+    El perfil controla límites de asignación.
+    Lambda sigue controlando la penalización por riesgo.
     """
 
+    perfil = (
+        str(perfil)
+        .strip()
+        .lower()
+    )
+
+    if perfil == "conservador":
+
+        return {
+            "min_bonos": 0.40,
+            "max_equity": 0.45,
+            "max_growth_tech": 0.25,
+            "max_alternativos": 0.10,
+            "peso_maximo": 0.20,
+        }
+
+    elif perfil == "moderado":
+
+        return {
+            "min_bonos": 0.20,
+            "max_equity": 0.70,
+            "max_growth_tech": 0.40,
+            "max_alternativos": 0.15,
+            "peso_maximo": 0.25,
+        }
+
+    # Crecimiento
+    return {
+        "min_bonos": 0.05,
+        "max_equity": 0.90,
+        "max_growth_tech": 0.60,
+        "max_alternativos": 0.20,
+        "peso_maximo": 0.30,
+    }
+
+
+# =========================================================
+# VALIDACIÓN
+# =========================================================
+
+def validar_datos(
+    retornos,
+    catalogo
+):
     if retornos.empty:
+
         raise ValueError(
             "No existen rendimientos para construir el portafolio."
         )
 
     if len(retornos) < 60:
+
         raise ValueError(
             "Se necesitan al menos 60 meses de información."
         )
 
-    columnas_catalogo = set(catalogo["ticker"])
-    columnas_retornos = set(retornos.columns)
+    columnas_retornos = set(
+        retornos.columns
+    )
 
     comunes = [
         ticker
@@ -70,6 +128,7 @@ def validar_datos(retornos, catalogo):
     ]
 
     if len(comunes) < 10:
+
         raise ValueError(
             "No hay suficientes activos con información completa."
         )
@@ -77,10 +136,176 @@ def validar_datos(retornos, catalogo):
     return comunes
 
 
+def _texto(valor):
+
+    return (
+        str(valor)
+        .strip()
+        .lower()
+    )
+
+
+# =========================================================
+# CLASIFICACIÓN DE ACTIVOS
+# =========================================================
+
+def _indices_bonos(
+    tickers,
+    clases
+):
+
+    tickers_bonos = {
+        "BND",
+        "AGG",
+        "SHY",
+        "IEF",
+        "TLT",
+        "TIP",
+        "LQD",
+        "HYG",
+        "VGSH",
+        "VGIT",
+        "VGLT",
+    }
+
+    indices = []
+
+    for i, ticker in enumerate(
+        tickers
+    ):
+
+        clase = _texto(
+            clases[i]
+        )
+
+        if (
+            "bond" in clase
+            or "fixed income" in clase
+            or "renta fija" in clase
+            or ticker.upper()
+            in tickers_bonos
+        ):
+
+            indices.append(i)
+
+    return indices
+
+
+def _indices_equity(
+    tickers,
+    clases,
+    sectores
+):
+
+    tickers_equity = {
+        "VOO",
+        "SPY",
+        "IVV",
+        "QQQ",
+        "QQQM",
+        "IWM",
+        "IWF",
+        "IWD",
+        "VTI",
+        "VEA",
+        "EFA",
+        "EEM",
+        "VWO",
+        "XLK",
+        "XLF",
+        "XLV",
+        "XLE",
+        "XLY",
+        "XLP",
+        "XLI",
+        "XLC",
+        "XLU",
+        "XLRE",
+    }
+
+    indices = []
+
+    for i, ticker in enumerate(
+        tickers
+    ):
+
+        clase = _texto(
+            clases[i]
+        )
+
+        sector = _texto(
+            sectores[i]
+        )
+
+        if (
+            "equity" in clase
+            or "stock" in clase
+            or "acciones" in clase
+            or "sector" in clase
+            or "equity" in sector
+            or ticker.upper()
+            in tickers_equity
+        ):
+
+            indices.append(i)
+
+    return indices
+
+
+def _indices_growth_tech(
+    tickers,
+    clases,
+    sectores
+):
+
+    tickers_growth = {
+        "QQQ",
+        "QQQM",
+        "IWF",
+        "VUG",
+        "XLK",
+        "SOXX",
+        "SMH",
+    }
+
+    indices = []
+
+    for i, ticker in enumerate(
+        tickers
+    ):
+
+        clase = _texto(
+            clases[i]
+        )
+
+        sector = _texto(
+            sectores[i]
+        )
+
+        if (
+            "technology" in sector
+            or "tech" in sector
+            or "growth" in sector
+            or "technology" in clase
+            or "growth" in clase
+            or ticker.upper()
+            in tickers_growth
+        ):
+
+            indices.append(i)
+
+    return indices
+
+
+# =========================================================
+# OPTIMIZACIÓN
+# =========================================================
+
 def optimizar_portafolio(
     retornos,
     catalogo,
     lambda_cliente,
+    perfil_cliente="Moderado",
     max_activos=8,
     peso_minimo=0.05,
     peso_maximo=0.30,
@@ -90,24 +315,18 @@ def optimizar_portafolio(
     alpha_cvar=0.95,
 ):
     """
-    Construye un portafolio mediante un modelo Mean-CVaR.
-
-    Variables:
-        w_i = peso del activo i
-        z_i = 1 si el activo forma parte del portafolio
-
-    Restricciones:
-        - suma de pesos = 1
-        - no short selling
-        - máximo K activos
-        - peso mínimo y máximo por activo
-        - exposición máxima por sector
-        - exposición máxima por clase de activo
-          (más baja para commodities y bienes raíces)
+    Portafolio Mean-CVaR con restricciones de suitability.
 
     Objetivo:
         maximizar rendimiento esperado
-        menos una penalización por CVaR.
+        - penalización * CVaR
+
+    Lambda:
+        controla la penalización por riesgo.
+
+    Perfil:
+        controla límites de bonos, equity,
+        growth/tech y alternativos.
     """
 
     comunes = validar_datos(
@@ -115,7 +334,12 @@ def optimizar_portafolio(
         catalogo
     )
 
-    retornos = retornos[comunes].copy()
+    retornos = (
+        retornos[
+            comunes
+        ]
+        .copy()
+    )
 
     catalogo = (
         catalogo
@@ -126,32 +350,83 @@ def optimizar_portafolio(
 
     tickers = comunes
 
-    n_activos = len(tickers)
-    n_escenarios = len(retornos)
-
-    # Rendimiento medio mensual de cada activo
-    mu = retornos.mean().to_numpy()
-
-    # Matriz:
-    # filas = meses históricos
-    # columnas = activos
-    escenarios = retornos.to_numpy()
-
-    penalizacion = penalizacion_desde_lambda(
-        lambda_cliente
+    n_activos = len(
+        tickers
     )
+
+    n_escenarios = len(
+        retornos
+    )
+
+    mu = (
+        retornos
+        .mean()
+        .to_numpy()
+    )
+
+    escenarios = (
+        retornos
+        .to_numpy()
+    )
+
+
+    # -----------------------------------------------------
+    # PARÁMETROS DEL CLIENTE
+    # -----------------------------------------------------
+
+    penalizacion = (
+        penalizacion_desde_lambda(
+            lambda_cliente
+        )
+    )
+
+    limites = (
+        limites_desde_perfil(
+            perfil_cliente
+        )
+    )
+
+    peso_maximo = min(
+        peso_maximo,
+        limites[
+            "peso_maximo"
+        ]
+    )
+
+    max_alternativos = min(
+        max_alternativos,
+        limites[
+            "max_alternativos"
+        ]
+    )
+
+    min_bonos = limites[
+        "min_bonos"
+    ]
+
+    max_equity = limites[
+        "max_equity"
+    ]
+
+    max_growth_tech = limites[
+        "max_growth_tech"
+    ]
+
+
+    # -----------------------------------------------------
+    # MODELO
+    # -----------------------------------------------------
 
     modelo = gp.Model(
         "behavioral_portfolio"
     )
 
-    # Para que Gurobi no llene la terminal de mensajes.
     modelo.Params.OutputFlag = 0
 
 
-    # --------------------------------------------------
-    # VARIABLES DE DECISIÓN
-    # --------------------------------------------------
+    # -----------------------------------------------------
+    # VARIABLES
+    # -----------------------------------------------------
 
     w = modelo.addVars(
         n_activos,
@@ -167,16 +442,12 @@ def optimizar_portafolio(
         name="z"
     )
 
-
-    # VaR
     eta = modelo.addVar(
         lb=-GRB.INFINITY,
         vtype=GRB.CONTINUOUS,
         name="VaR"
     )
 
-
-    # Exceso de pérdida sobre VaR para cada escenario
     u = modelo.addVars(
         n_escenarios,
         lb=0.0,
@@ -185,60 +456,91 @@ def optimizar_portafolio(
     )
 
 
-    # --------------------------------------------------
-    # RESTRICCIONES DEL PORTAFOLIO
-    # --------------------------------------------------
+    # -----------------------------------------------------
+    # CAPITAL TOTAL
+    # -----------------------------------------------------
 
     modelo.addConstr(
         gp.quicksum(
             w[i]
-            for i in range(n_activos)
+            for i in range(
+                n_activos
+            )
         ) == 1,
         name="capital_total"
     )
 
 
-    # Máximo número de activos
+    # -----------------------------------------------------
+    # NÚMERO MÁXIMO DE ACTIVOS
+    # -----------------------------------------------------
+
     modelo.addConstr(
         gp.quicksum(
             z[i]
-            for i in range(n_activos)
+            for i in range(
+                n_activos
+            )
         ) <= max_activos,
         name="max_activos"
     )
 
 
-    # Relación entre selección y peso
-    for i in range(n_activos):
+    # -----------------------------------------------------
+    # PESO MÍNIMO Y MÁXIMO
+    # -----------------------------------------------------
+
+    for i in range(
+        n_activos
+    ):
 
         modelo.addConstr(
-            w[i] <= peso_maximo * z[i],
+            w[i]
+            <= peso_maximo
+            * z[i],
             name=f"peso_max_{i}"
         )
 
         modelo.addConstr(
-            w[i] >= peso_minimo * z[i],
+            w[i]
+            >= peso_minimo
+            * z[i],
             name=f"peso_min_{i}"
         )
 
 
-    # --------------------------------------------------
+    sector_activo = (
+        catalogo[
+            "sector"
+        ]
+        .tolist()
+    )
+
+    clase_activo = (
+        catalogo[
+            "clase"
+        ]
+        .tolist()
+    )
+
+
+    # -----------------------------------------------------
     # LÍMITE POR SECTOR
-    # --------------------------------------------------
+    # -----------------------------------------------------
 
-    # Guardamos sector y clase en listas para no buscar
-    # en el DataFrame dentro de cada ciclo (es mucho más rápido).
-    sector_activo = catalogo["sector"].tolist()
-    clase_activo = catalogo["clase"].tolist()
-
-    sectores = catalogo["sector"].unique()
-
-    for sector in sectores:
+    for sector in (
+        catalogo[
+            "sector"
+        ].unique()
+    ):
 
         indices = [
             i
-            for i in range(n_activos)
-            if sector_activo[i] == sector
+            for i in range(
+                n_activos
+            )
+            if sector_activo[i]
+            == sector
         ]
 
         modelo.addConstr(
@@ -250,29 +552,44 @@ def optimizar_portafolio(
         )
 
 
-    # --------------------------------------------------
-    # LÍMITE POR CLASE DE ACTIVO
-    # --------------------------------------------------
+    # -----------------------------------------------------
+    # LÍMITE POR CLASE
+    # -----------------------------------------------------
 
-    # Sin este límite el modelo ponía hasta 55% en oro
-    # y commodities, porque en la muestra 2020-2026
-    # el oro tuvo rendimientos muy altos. Como es común en
-    # asesoría, los activos alternativos (commodities y
-    # bienes raíces) tienen un límite más bajo.
-    clases = catalogo["clase"].unique()
-
-    for clase in clases:
+    for clase in (
+        catalogo[
+            "clase"
+        ].unique()
+    ):
 
         indices = [
             i
-            for i in range(n_activos)
-            if clase_activo[i] == clase
+            for i in range(
+                n_activos
+            )
+            if clase_activo[i]
+            == clase
         ]
 
-        if clase in ["Commodities", "Real Estate"]:
-            limite = max_alternativos
+        clase_norm = _texto(
+            clase
+        )
+
+        if (
+            "commodit" in clase_norm
+            or "real estate"
+            in clase_norm
+        ):
+
+            limite = (
+                max_alternativos
+            )
+
         else:
-            limite = max_clase
+
+            limite = (
+                max_clase
+            )
 
         modelo.addConstr(
             gp.quicksum(
@@ -283,23 +600,103 @@ def optimizar_portafolio(
         )
 
 
-    # --------------------------------------------------
-    # CVaR
-    # --------------------------------------------------
+    # =====================================================
+    # SUITABILITY
+    # =====================================================
 
-    for s in range(n_escenarios):
-
-        # Rendimiento del portafolio en el escenario s
-        rendimiento_s = gp.quicksum(
-            escenarios[s, i] * w[i]
-            for i in range(n_activos)
+    indices_bonos = (
+        _indices_bonos(
+            tickers,
+            clase_activo
         )
+    )
 
-        # Pérdida = -rendimiento
-        perdida_s = -rendimiento_s
+    if min_bonos > 0:
+
+        if not indices_bonos:
+
+            raise ValueError(
+                "El perfil requiere bonos, pero "
+                "el catálogo no contiene activos "
+                "de renta fija reconocibles."
+            )
 
         modelo.addConstr(
-            u[s] >= perdida_s - eta,
+            gp.quicksum(
+                w[i]
+                for i
+                in indices_bonos
+            ) >= min_bonos,
+            name="min_bonos_perfil"
+        )
+
+
+    indices_equity = (
+        _indices_equity(
+            tickers,
+            clase_activo,
+            sector_activo
+        )
+    )
+
+    if indices_equity:
+
+        modelo.addConstr(
+            gp.quicksum(
+                w[i]
+                for i
+                in indices_equity
+            ) <= max_equity,
+            name="max_equity_perfil"
+        )
+
+
+    indices_growth = (
+        _indices_growth_tech(
+            tickers,
+            clase_activo,
+            sector_activo
+        )
+    )
+
+    if indices_growth:
+
+        modelo.addConstr(
+            gp.quicksum(
+                w[i]
+                for i
+                in indices_growth
+            ) <= max_growth_tech,
+            name="max_growth_tech_perfil"
+        )
+
+
+    # =====================================================
+    # CVaR
+    # =====================================================
+
+    for s in range(
+        n_escenarios
+    ):
+
+        rendimiento_s = (
+            gp.quicksum(
+                escenarios[s, i]
+                * w[i]
+                for i in range(
+                    n_activos
+                )
+            )
+        )
+
+        perdida_s = (
+            -rendimiento_s
+        )
+
+        modelo.addConstr(
+            u[s]
+            >= perdida_s
+            - eta,
             name=f"cvar_{s}"
         )
 
@@ -307,31 +704,43 @@ def optimizar_portafolio(
     cvar = (
         eta
         +
-        (1 / ((1 - alpha_cvar) * n_escenarios))
+        (
+            1
+            /
+            (
+                (1 - alpha_cvar)
+                * n_escenarios
+            )
+        )
         * gp.quicksum(
             u[s]
-            for s in range(n_escenarios)
+            for s
+            in range(
+                n_escenarios
+            )
         )
     )
 
 
-    # --------------------------------------------------
-    # RENDIMIENTO ESPERADO
-    # --------------------------------------------------
-
-    rendimiento_esperado = gp.quicksum(
-        mu[i] * w[i]
-        for i in range(n_activos)
+    rendimiento_esperado = (
+        gp.quicksum(
+            mu[i]
+            * w[i]
+            for i in range(
+                n_activos
+            )
+        )
     )
 
 
-    # --------------------------------------------------
-    # FUNCIÓN OBJETIVO
-    # --------------------------------------------------
+    # -----------------------------------------------------
+    # OBJETIVO
+    # -----------------------------------------------------
 
     modelo.setObjective(
         rendimiento_esperado
-        - penalizacion * cvar,
+        - penalizacion
+        * cvar,
         GRB.MAXIMIZE
     )
 
@@ -339,44 +748,63 @@ def optimizar_portafolio(
     modelo.optimize()
 
 
-    # --------------------------------------------------
+    # -----------------------------------------------------
     # VALIDACIÓN
-    # --------------------------------------------------
+    # -----------------------------------------------------
 
     if modelo.Status != GRB.OPTIMAL:
+
+        if modelo.Status == GRB.INFEASIBLE:
+
+            raise ValueError(
+                "Las restricciones del perfil "
+                "hicieron el modelo infactible. "
+                "Revisa el catálogo o los límites."
+            )
+
         raise ValueError(
             "Gurobi no encontró una solución óptima."
         )
 
 
+    # -----------------------------------------------------
+    # RESULTADO
+    # -----------------------------------------------------
+
     pesos = pd.Series(
         [
             w[i].X
-            for i in range(n_activos)
+            for i in range(
+                n_activos
+            )
         ],
         index=tickers,
         name="Peso"
     )
 
-
-    # Eliminamos errores numéricos diminutos
     pesos[
-        np.abs(pesos) < 1e-8
+        np.abs(
+            pesos
+        ) < 1e-8
     ] = 0.0
 
-
-    pesos = pesos[
-        pesos > 0
-    ].sort_values(
-        ascending=False
+    pesos = (
+        pesos[
+            pesos > 0
+        ]
+        .sort_values(
+            ascending=False
+        )
     )
 
 
     rendimiento_mensual = sum(
-        mu[i] * w[i].X
-        for i in range(n_activos)
+        mu[i]
+        * w[i].X
+        for i in range(
+            n_activos
+        )
     )
-
 
     rendimiento_anual = (
         (1 + rendimiento_mensual) ** 12
@@ -384,7 +812,7 @@ def optimizar_portafolio(
     )
 
 
-    resultado = ResultadoPortafolio(
+    return ResultadoPortafolio(
         pesos=pesos,
         rendimiento_mensual=float(
             rendimiento_mensual
@@ -401,11 +829,16 @@ def optimizar_portafolio(
         penalizacion_riesgo=float(
             penalizacion
         ),
-        numero_activos=len(pesos),
+        numero_activos=len(
+            pesos
+        ),
         estado="OPTIMAL"
     )
 
-    return resultado
+
+# =========================================================
+# PRUEBA LOCAL
+# =========================================================
 
 if __name__ == "__main__":
 
@@ -418,19 +851,22 @@ if __name__ == "__main__":
         "\nCargando información..."
     )
 
-    catalogo = cargar_catalogo()
-
-    precios, retornos = preparar_datos()
-
-
-    # Cliente de prueba:
-    # lambda = 2.5
-    resultado = optimizar_portafolio(
-        retornos=retornos,
-        catalogo=catalogo,
-        lambda_cliente=2.5
+    catalogo = (
+        cargar_catalogo()
     )
 
+    precios, retornos = (
+        preparar_datos()
+    )
+
+    resultado = (
+        optimizar_portafolio(
+            retornos=retornos,
+            catalogo=catalogo,
+            lambda_cliente=2.5,
+            perfil_cliente="Moderado"
+        )
+    )
 
     print(
         "\nPORTAFOLIO RECOMENDADO"
@@ -440,26 +876,17 @@ if __name__ == "__main__":
         resultado.pesos
     )
 
-
     print(
         "\nRendimiento mensual esperado:",
         f"{resultado.rendimiento_mensual:.2%}"
     )
-
 
     print(
         "Rendimiento anual aproximado:",
         f"{resultado.rendimiento_anual:.2%}"
     )
 
-
     print(
         "CVaR mensual 95%:",
         f"{resultado.cvar_mensual:.2%}"
-    )
-
-
-    print(
-        "Penalización por riesgo:",
-        f"{resultado.penalizacion_riesgo:.2f}"
     )
